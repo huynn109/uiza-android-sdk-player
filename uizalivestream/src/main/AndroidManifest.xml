@@ -14,4 +14,5 @@
 
     <application android:allowBackup="true" android:usesCleartextTraffic="true" android:required="false" />
 
+
 </manifest>

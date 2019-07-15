@@ -1,5 +1,5 @@
 apply plugin: 'com.android.library'
-apply plugin: 'com.github.dcendents.android-maven'
+//apply plugin: 'com.github.dcendents.android-maven'
 group = 'com.github.tplloi'
 
 android {
@@ -32,12 +32,17 @@ android {
         //release & debug is in project animators
         //matchingFallbacks = ['release', 'debug']
     }
+    compileOptions {
+        // from 2.9.0 need turn on Java 8 support https://exoplayer.dev/hello-world.html#turn-on-java-8-support
+        // https://github.com/google/ExoPlayer/blob/release-v2/RELEASENOTES.md#290
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
 }
 
 dependencies {
     api project(':uizabase')
     //https://github.com/pedroSG94/rtmp-rtsp-stream-client-java
-    api 'com.github.pedroSG94.rtmp-rtsp-stream-client-java:rtplibrary:1.6.2'
+    api 'com.github.pedroSG94.rtmp-rtsp-stream-client-java:rtplibrary:1.6.4'
 
     // if you want to modify the version of these dependencies, check this link below
     // https://github.com/powermock/powermock/wiki/Mockito

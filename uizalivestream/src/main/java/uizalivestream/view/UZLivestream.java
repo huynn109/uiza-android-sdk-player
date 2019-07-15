@@ -8,8 +8,11 @@ import android.content.Context;
 import android.content.Intent;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
+import android.media.audiofx.AcousticEchoCanceler;
+import android.media.audiofx.NoiseSuppressor;
 import android.net.Uri;
 import android.os.Build;
+import android.os.CountDownTimer;
 import android.os.Environment;
 import android.provider.Settings;
 import android.support.annotation.RequiresApi;
@@ -22,9 +25,6 @@ import android.view.View;
 import android.widget.ProgressBar;
 import android.widget.RelativeLayout;
 import android.widget.TextView;
-import android.media.audiofx.AcousticEchoCanceler;
-import android.media.audiofx.NoiseSuppressor;
-
 import com.google.gson.Gson;
 import com.karumi.dexter.Dexter;
 import com.karumi.dexter.MultiplePermissionsReport;
@@ -39,17 +39,15 @@ import com.pedro.encoder.input.gl.render.filters.object.TextObjectFilterRender;
 import com.pedro.encoder.input.video.CameraHelper;
 import com.pedro.encoder.utils.gl.TranslateTo;
 import com.pedro.rtplibrary.rtmp.RtmpCamera1;
+import com.pedro.rtplibrary.util.BitrateAdapter;
 import com.pedro.rtplibrary.view.OpenGlView;
-
-import net.ossrs.rtmp.ConnectCheckerRtmp;
-
 import java.io.File;
 import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
-
+import net.ossrs.rtmp.ConnectCheckerRtmp;
 import retrofit2.HttpException;
 import uizalivestream.R;
 import uizalivestream.data.UZLivestreamData;
@@ -86,6 +84,8 @@ public class UZLivestream extends RelativeLayout
 
     private final String TAG = getClass().getSimpleName();
     private static final String TIME_FORMAT = "yyyyMMdd_HHmmss";
+    private static final long SECOND = 1000;
+    private static final long MINUTE = 60 * SECOND;
 
     private Gson gson = new Gson();
     private String currentDateAndTime = "";
@@ -100,7 +100,12 @@ public class UZLivestream extends RelativeLayout
     private boolean isShowDialogCheck;
     private RtmpCameraHelper cameraHelper;
     private boolean isSavedToDevice;
-    private boolean isFrontCamera = true;
+    private CameraHelper.Facing lastFacing = CameraHelper.Facing.FRONT;
+    private long backgroundAllowedDuration = 2 * MINUTE; // default is 2 minutes
+    private boolean isBroadcastingBeforeGoingBackground;
+    private boolean isFromBackgroundTooLong;
+    private boolean isLandscape;
+    private CountDownTimer backgroundTimer;
 
     public void setCameraCallback(CameraCallback cameraCallback) {
         if (cameraHelper != null) {
@@ -191,10 +196,53 @@ public class UZLivestream extends RelativeLayout
         }
     }
 
+    /**
+     * Must be called when the app go to resume state
+     */
     public void onResume() {
         if (!isShowDialogCheck) {
             checkPermission();
         }
+
+        checkAndResumeLivestreamIfNeeded();
+
+        if (isFromBackgroundTooLong) {
+            if (uzLivestreamCallback != null) {
+                uzLivestreamCallback.onBackgroundTooLong();
+            }
+            isFromBackgroundTooLong = false;
+        }
+    }
+
+    private void checkAndResumeLivestreamIfNeeded() {
+        cancelBackgroundTimer();
+
+        if (!isBroadcastingBeforeGoingBackground) return;
+
+        isBroadcastingBeforeGoingBackground = false;
+        // We delay a second because the surface need to be resumed before we can prepare something
+        // Improve this method whenever you can
+        LUIUtil.setDelay((int) SECOND, new LUIUtil.DelayCallback() {
+            @Override
+            public void doAfter(int mls) {
+                try {
+                    stopStream(); // make sure stop stream and start it again
+                    if (prepareAudio() && prepareVideo(isLandscape)) {
+                        startStream(getMainStreamUrl(), isSavedToDevice());
+                    }
+                } catch (Exception ignored) {
+                    Log.e(TAG, "Can not resume livestream right now !");
+                }
+            }
+        });
+    }
+
+    /**
+     * Set duration which allows livestream to keep the info
+     * @param duration the duration which allows livestream to keep the info
+     */
+    public void setBackgroundAllowedDuration(long duration) {
+        this.backgroundAllowedDuration = duration;
     }
 
     public void destroyApiMaster() {
@@ -301,6 +349,8 @@ public class UZLivestream extends RelativeLayout
         this.uzLivestreamCallback = uzLivestreamCallback;
     }
 
+    //class needed
+    private BitrateAdapter bitrateAdapter;
     @Override
     public void onConnectionSuccessRtmp() {
         ((Activity) getContext()).runOnUiThread(new Runnable() {
@@ -313,10 +363,19 @@ public class UZLivestream extends RelativeLayout
                 LDialogUtil.hide(progressBar);
             }
         });
+        bitrateAdapter = new BitrateAdapter(new BitrateAdapter.Listener() {
+
+            @Override
+            public void onBitrateAdapted(int bitrate) {
+                cameraHelper.getRtmpCamera().setVideoBitrateOnFly(bitrate);
+            }
+        });
+        bitrateAdapter.setMaxBitrate(cameraHelper.getRtmpCamera().getBitrate());
         if (uzLivestreamCallback != null) {
             uzLivestreamCallback.onConnectionSuccessRtmp();
         }
-        // switchCamera(); // why switch camera when connect success
+
+        isBroadcastingBeforeGoingBackground = true;
     }
 
     @Override
@@ -334,6 +393,17 @@ public class UZLivestream extends RelativeLayout
         if (uzLivestreamCallback != null) {
             uzLivestreamCallback.onConnectionFailedRtmp(reason);
         }
+    }
+
+    @Override
+    public void onNewBitrateRtmp(final long bitrate) {
+        if (bitrateAdapter != null) bitrateAdapter.adaptBitrate(bitrate);
+        ((Activity) getContext()).runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                Log.d("huynn109", bitrate + " bps");
+            }
+        });
     }
 
     @Override
@@ -382,14 +452,18 @@ public class UZLivestream extends RelativeLayout
             uzLivestreamCallback.surfaceChanged(new StartPreview() {
                 @Override
                 public void onSizeStartPreview(int width, int height) {
-                    boolean canStart = cameraHelper.startPreview(isFrontCamera ? CameraHelper.Facing.FRONT : CameraHelper.Facing.BACK, width, height);
-                    if (canStart) {
-                        updateUISurfaceView(width, height);
-                    } else {
-                        uzLivestreamCallback.onError(getString(R.string.camera_not_running_properly));
-                    }
+                    startPreview(lastFacing, width, height);
                 }
             });
+        }
+    }
+
+    private void startPreview(CameraHelper.Facing facing, int width, int height) {
+        boolean canStart = cameraHelper.startPreview(facing, width, height);
+        if (canStart) {
+            updateUISurfaceView(width, height);
+        } else {
+            uzLivestreamCallback.onError(getString(R.string.camera_not_running_properly));
         }
     }
 
@@ -398,6 +472,30 @@ public class UZLivestream extends RelativeLayout
         if (!isCameraValid()) return;
         stopStream();
         stopPreview();
+        startBackgroundTimer();
+    }
+
+    private void startBackgroundTimer() {
+        if (backgroundTimer == null) {
+            backgroundTimer = new CountDownTimer(backgroundAllowedDuration, SECOND) {
+                public void onTick(long millisUntilFinished) {
+
+                }
+
+                public void onFinish() {
+                    isBroadcastingBeforeGoingBackground = false;
+                    isFromBackgroundTooLong = true;
+                }
+            };
+        }
+        backgroundTimer.start();
+    }
+
+    private void cancelBackgroundTimer() {
+        if (backgroundTimer != null) {
+            backgroundTimer.cancel();
+        }
+        backgroundTimer = null;
     }
 
     public void startStream(String streamUrl) {
@@ -459,16 +557,16 @@ public class UZLivestream extends RelativeLayout
     }
 
     /**
-     * Call this method before use @startStream. If not you will do a stream without audio.
-     *
-     * @param sampleRate      of audio in hz. Can be 8000, 16000, 22500, 32000, 44100.
-     * @param isStereo        true if you want Stereo audio (2 audio channels), false if you want Mono audio
-     *                        (1 audio channel).
-     * @param echoCanceler    true enable echo canceler, false disable.
-     * @param noiseSuppressor true enable noise suppressor, false  disable.
-     * @return true if success, false if you get a error (Normally because the encoder selected
-     * doesn't support any configuration seated or your device hasn't a AAC encoder).
-     */
+      * Call this method before use @startStream. If not you will do a stream without audio.
+      *
+      * @param sampleRate of audio in hz. Can be 8000, 16000, 22500, 32000, 44100.
+      * @param isStereo true if you want Stereo audio (2 audio channels), false if you want Mono audio
+      * (1 audio channel).
+      * @param echoCanceler true enable echo canceler, false disable.
+      * @param noiseSuppressor true enable noise suppressor, false  disable.
+      * @return true if success, false if you get a error (Normally because the encoder selected
+      * doesn't support any configuration seated or your device hasn't a AAC encoder).
+      */
     public boolean prepareAudio(int sampleRate, boolean isStereo, boolean echoCanceler, boolean noiseSuppressor) {
         return cameraHelper.prepareAudio(sampleRate, isStereo, echoCanceler, noiseSuppressor);
     }
@@ -482,6 +580,7 @@ public class UZLivestream extends RelativeLayout
     }
 
     private boolean prepareVideoFullHD(boolean isLandscape) {
+        this.isLandscape = isLandscape;
         return cameraHelper.prepareVideoFullHD(getContext(), presetLiveStreamingFeed, isLandscape);
     }
 
@@ -494,6 +593,7 @@ public class UZLivestream extends RelativeLayout
     }
 
     private boolean prepareVideoHD(boolean isLandscape) {
+        this.isLandscape = isLandscape;
         return cameraHelper.prepareVideoHD(getContext(), presetLiveStreamingFeed, isLandscape);
     }
 
@@ -506,6 +606,7 @@ public class UZLivestream extends RelativeLayout
     }
 
     private boolean prepareVideoSD(boolean isLandscape) {
+        this.isLandscape = isLandscape;
         return cameraHelper.prepareVideoSD(getContext(), presetLiveStreamingFeed, isLandscape);
     }
 
@@ -518,6 +619,7 @@ public class UZLivestream extends RelativeLayout
     }
 
     private boolean prepareVideo(boolean isLandscape) {
+        this.isLandscape = isLandscape;
         return cameraHelper.prepareVideo(getContext(), presetLiveStreamingFeed, isLandscape);
     }
 
@@ -662,7 +764,7 @@ public class UZLivestream extends RelativeLayout
                 presetLiveStreamingFeed = new PresetLiveStreamingFeed();
                 presetLiveStreamingFeed.setTranscode(isTranscode);
                 presetLiveStreamingFeed.setVideoBitRates(isConnectedFast);
-
+                
                 LLog.d(TAG, "isErrorStartLive " + isErrorStartLive);
                 if (isErrorStartLive) {
                     if (d.getLastProcess() == null) {
@@ -707,7 +809,7 @@ public class UZLivestream extends RelativeLayout
 
     public void switchCamera() {
         cameraHelper.switchCamera();
-        isFrontCamera = !isFrontCamera;
+        lastFacing = getRtmpCamera().isFrontCamera() ? CameraHelper.Facing.FRONT : CameraHelper.Facing.BACK;
     }
 
     public boolean isAAEnabled() {
