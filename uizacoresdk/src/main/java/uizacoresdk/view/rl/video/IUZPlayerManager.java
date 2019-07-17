@@ -7,6 +7,7 @@ import android.os.Handler;
 import android.os.SystemClock;
 import android.text.TextUtils;
 import android.widget.ImageView;
+import com.bumptech.glide.Glide;
 import com.bumptech.glide.request.target.Target;
 import com.github.rubensousa.previewseekbar.PreviewLoader;
 import com.google.android.exoplayer2.C;
@@ -59,7 +60,6 @@ import com.google.android.exoplayer2.video.VideoListener;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
-import uizacoresdk.glide.GlideApp;
 import uizacoresdk.glide.GlideThumbnailTransformationPB;
 import uizacoresdk.interfaces.UZBufferCallback;
 import uizacoresdk.listerner.ProgressCallback;
@@ -192,7 +192,7 @@ abstract class IUZPlayerManager implements PreviewLoader {
         }
         setPlayWhenReady(false);
         if (thumbnailsUrl != null) {
-            GlideApp.with(imageView)
+            Glide.with(imageView)
                     .load(thumbnailsUrl)
                     .override(Target.SIZE_ORIGINAL, Target.SIZE_ORIGINAL)
                     .transform(new GlideThumbnailTransformationPB(currentPosition))
@@ -485,37 +485,40 @@ abstract class IUZPlayerManager implements PreviewLoader {
         player.addTextOutput(new UZTextOutputListener());
     }
 
-    MediaSource createMediaSourceWithSubtitle(MediaSource mediaSource) {
+    MediaSource createMediaSourceWithSubtitle(MediaSource videoMediaSource) {
         if (subtitleList == null || subtitleList.isEmpty()) {
-            return mediaSource;
+            return videoMediaSource;
         }
-        List<SingleSampleMediaSource> singleSampleMediaSourceList = new ArrayList<>();
+        List<MediaSource> mergedMediaSource = new ArrayList<>();
+        mergedMediaSource.add(videoMediaSource);
+
+        // Try to add text (subtitle) media source
         for (int i = 0; i < subtitleList.size(); i++) {
+
             Subtitle subtitle = subtitleList.get(i);
-            if (subtitle == null || subtitle.getLanguage() == null || TextUtils.isEmpty(subtitle.getUrl())) {
+
+            if (subtitle == null || TextUtils.isEmpty(subtitle.getLanguage()) || TextUtils.isEmpty(
+                    subtitle.getUrl()) || subtitle.getStatus() == Subtitle.Status.DISABLE) {
                 continue;
             }
+
             DefaultDataSourceFactory dataSourceFactory =
                     new DefaultDataSourceFactory(context, Constants.USER_AGENT, bandwidthMeter);
             //Text Format Initialization
             Format textFormat = Format.createTextSampleFormat(null, MimeTypes.TEXT_VTT, null, Format.NO_VALUE,
                     Format.NO_VALUE, subtitle.getLanguage(), null, Format.OFFSET_SAMPLE_RELATIVE);
-            SingleSampleMediaSource textMediaSource =
+            MediaSource textMediaSource =
                     new SingleSampleMediaSource.Factory(dataSourceFactory).createMediaSource(
                             Uri.parse(subtitle.getUrl()), textFormat, C.TIME_UNSET);
-            singleSampleMediaSourceList.add(textMediaSource);
-        }
-        MediaSource mediaSourceWithSubtitle = null;
-        for (int i = 0; i < singleSampleMediaSourceList.size(); i++) {
-            SingleSampleMediaSource singleSampleMediaSource = singleSampleMediaSourceList.get(i);
-            if (i == 0) {
-                mediaSourceWithSubtitle = new MergingMediaSource(mediaSource, singleSampleMediaSource);
+            // Re-order default subtitle right after video source
+            if (subtitle.getIsDefault() == 1) {
+                mergedMediaSource.add(1, textMediaSource);
             } else {
-                mediaSourceWithSubtitle =
-                        new MergingMediaSource(mediaSourceWithSubtitle, singleSampleMediaSource);
+                mergedMediaSource.add(textMediaSource);
             }
         }
-        return mediaSourceWithSubtitle;
+
+        return new MergingMediaSource(mergedMediaSource.toArray(new MediaSource[0]));
     }
 
     /**
